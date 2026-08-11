@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="description" content="Real-time Chrome API change monitoring dashboard">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:">
+    <title>Chrome API Monitor</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --surface2: #334155;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --border: #475569;
+            --radius: 12px;
+            --shadow: 0 10px 40px rgba(0,0,0,0.35);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+        .container { max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px; }
+        header {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 28px 32px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+        }
+        h1 {
+            font-size: 1.85rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-top: 4px; }
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .status-item {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 18px;
+            text-align: center;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+        }
+        .status-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+        .status-value { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+        .status-indicator {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--success);
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+            vertical-align: middle;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); }
+            50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+        }
+        .controls {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            border: 1px solid var(--border);
+        }
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        button:hover:not(:disabled) { background: var(--primary-hover); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary { background: var(--surface2); }
+        .filter-group { display: flex; gap: 8px; align-items: center; }
+        label { font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
+        select {
+            padding: 9px 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            background: var(--surface2);
+            color: var(--text);
+            cursor: pointer;
+            min-width: 130px;
+        }
+        select:focus { outline: none; border-color: var(--primary); }
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+            background: var(--surface);
+            padding: 6px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            width: fit-content;
+        }
+        .tab {
+            padding: 10px 22px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            background: transparent;
+            border: none;
+        }
+        .tab.active {
+            background: var(--primary);
+            color: white;
+        }
+        .panel { display: none; }
+        .panel.active { display: block; }
+        .panel-box {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 24px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            min-height: 360px;
+        }
+        .change-card {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 14px;
+            background: var(--bg);
+        }
+        .change-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .category-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .category-extensions { background: rgba(59,130,246,0.2); color: #60a5fa; }
+        .category-webstore { background: rgba(168,85,247,0.2); color: #c084fc; }
+        .category-devtools { background: rgba(34,197,94,0.2); color: #4ade80; }
+        .timestamp { color: var(--text-muted); font-size: 0.85rem; }
+        .change-type {
+            font-weight: 600;
+            margin-bottom: 8px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            font-size: 0.8rem;
+        }
+        .type-added { background: rgba(34,197,94,0.15); color: var(--success); }
+        .type-modified { background: rgba(245,158,11,0.15); color: var(--warning); }
+        .type-removed { background: rgba(239,68,68,0.15); color: var(--danger); }
+        .change-item, .api-item {
+            padding: 9px 12px;
+            margin: 5px 0;
+            background: var(--surface);
+            border-radius: 6px;
+            border-left: 3px solid var(--primary);
+        }
+        .change-item a, .api-item a {
+            color: #a5b4fc;
+            text-decoration: none;
+            font-weight: 500;
+            word-break: break-word;
+        }
+        .change-item a:hover, .api-item a:hover { text-decoration: underline; color: #c7d2fe; }
+        .api-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 10px;
+        }
+        .api-category-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin: 20px 0 12px;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .api-category-title:first-child { margin-top: 0; }
+        .count-pill {
+            background: var(--surface2);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        .search-box {
+            width: 100%;
+            max-width: 360px;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 0.95rem;
+            margin-bottom: 16px;
+        }
+        .search-box:focus { outline: none; border-color: var(--primary); }
+        .empty-state, .loading, .error {
+            text-align: center;
+            padding: 50px 20px;
+            color: var(--text-muted);
+        }
+        .empty-state h2 { color: var(--text); margin-bottom: 8px; font-size: 1.25rem; }
+        .spinner {
+            border: 3px solid var(--surface2);
+            border-top: 3px solid var(--primary);
+            border-radius: 50%;
+            width: 40px; height: 40px;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error {
+            background: rgba(239,68,68,0.1);
+            color: #fca5a5;
+            border-radius: 8px;
+            border-left: 4px solid var(--danger);
+            text-align: left;
+            padding: 16px 20px;
+        }
+        .hint {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 16px;
+            padding: 10px 14px;
+            background: rgba(99,102,241,0.08);
+            border-radius: 8px;
+            border-left: 3px solid var(--primary);
+        }
+        @media (max-width: 768px) {
+            h1 { font-size: 1.4rem; }
+            .controls { flex-direction: column; align-items: stretch; }
+            .filter-group, select, button { width: 100%; }
+            .tabs { width: 100%; }
+            .tab { flex: 1; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Chrome API Monitor</h1>
+            <p class="subtitle">Live inventory + change detection for Chrome Extension, Web Store &amp; DevTools Protocol APIs</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-label">Status</div>
+                <div class="status-value">
+                    <span class="status-indicator"></span>
+                    <span id="monitoring-status">Active</span>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Total Changes</div>
+                <div class="status-value" id="total-changes">0</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">APIs Tracked</div>
+                <div class="status-value" id="api-count">0</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Last Check</div>
+                <div class="status-value" id="last-check" style="font-size:1.05rem">—</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="refresh-btn">Refresh Now</button>
+            <button id="clear-btn" class="btn-secondary">Clear Changes View</button>
+            <div class="filter-group" id="changes-filters">
+                <label for="category-filter">Category</label>
+                <select id="category-filter">
+                    <option value="all">All</option>
+                    <option value="extensions">Extensions</option>
+                    <option value="webstore">WebStore</option>
+                    <option value="devtools">DevTools</option>
+                </select>
+            </div>
+            <div class="filter-group" id="type-filters">
+                <label for="type-filter">Type</label>
+                <select id="type-filter">
+                    <option value="all">All</option>
+                    <option value="added">Added</option>
+                    <option value="modified">Modified</option>
+                    <option value="removed">Removed</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" data-tab="apis">Tracked APIs</button>
+            <button class="tab" data-tab="changes">Change History</button>
+        </div>
+
+        <div id="panel-apis" class="panel active">
+            <div class="panel-box">
+                <input type="search" class="search-box" id="api-search" placeholder="Search APIs by name...">
+                <div id="apis-content">
+                    <div class="loading"><div class="spinner"></div><p>Loading tracked APIs...</p></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="panel-changes" class="panel">
+            <div class="panel-box">
+                <div class="hint">Changes appear only after the second monitoring cycle detects differences in the official docs (every ~15 min). The first run establishes the baseline.</div>
+                <div id="changes-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        const REFRESH_INTERVAL = 30000;
+        let refreshTimer = null;
+        let allChanges = [];
+        let allApis = { extensions: [], webstore: [], devtools: [] };
+
+        const escapeHtml = (text) => {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        };
+
+        const formatDate = (isoString) => {
+            if (!isoString) return '—';
+            const date = new Date(isoString);
+            if (isNaN(date.getTime())) return '—';
+            const now = new Date();
+            const diff = now - date;
+            const minutes = Math.floor(diff / 60000);
+            const hours = Math.floor(diff / 3600000);
+            const days = Math.floor(diff / 86400000);
+            if (minutes < 1) return 'Just now';
+            if (minutes < 60) return minutes + 'm ago';
+            if (hours < 24) return hours + 'h ago';
+            if (days < 7) return days + 'd ago';
+            return date.toLocaleDateString();
+        };
+
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        const showChangesEmpty = () => {
+            document.getElementById('changes-content').innerHTML =
+                '<div class="empty-state"><h2>No changes detected yet</h2><p>Baseline is established on first run. Real additions, modifications and removals will appear here after the next monitoring cycles when official docs change.</p></div>';
+        };
+
+        const renderChange = (change) => {
+            const sections = [];
+            ['added', 'modified', 'removed'].forEach(type => {
+                if (change[type] && change[type].length > 0) {
+                    const items = change[type].map(item =>
+                        '<div class="change-item"><a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener noreferrer">' +
+                        escapeHtml(item.title || item.id) + '</a></div>'
+                    ).join('');
+                    sections.push(
+                        '<div class="change-section"><div class="change-type type-' + type + '">' +
+                        type.charAt(0).toUpperCase() + type.slice(1) + ' (' + change[type].length + ')</div>' + items + '</div>'
+                    );
+                }
+            });
+            if (!sections.length) return '';
+            return '<div class="change-card"><div class="change-header">' +
+                '<span class="category-badge category-' + escapeHtml(change.category) + '">' + escapeHtml(change.category) + '</span>' +
+                '<span class="timestamp">' + formatDate(change.timestamp) + '</span></div>' + sections.join('') + '</div>';
+        };
+
+        const filterChanges = () => {
+            const cat = document.getElementById('category-filter').value;
+            const typ = document.getElementById('type-filter').value;
+            let filtered = allChanges;
+            if (cat !== 'all') filtered = filtered.filter(c => c.category === cat);
+            if (typ !== 'all') filtered = filtered.filter(c => c[typ] && c[typ].length > 0);
+            const el = document.getElementById('changes-content');
+            if (!filtered.length) showChangesEmpty();
+            else el.innerHTML = filtered.map(renderChange).join('');
+        };
+
+        const renderApis = () => {
+            const q = (document.getElementById('api-search').value || '').toLowerCase().trim();
+            const cats = ['extensions', 'webstore', 'devtools'];
+            let html = '';
+            let totalShown = 0;
+            cats.forEach(cat => {
+                let list = allApis[cat] || [];
+                if (q) list = list.filter(a => (a.id + ' ' + a.title).toLowerCase().includes(q));
+                if (!list.length && q) return;
+                totalShown += list.length;
+                html += '<div class="api-category-title"><span class="category-badge category-' + cat + '">' + cat + '</span>' +
+                    '<span class="count-pill">' + list.length + '</span></div>';
+                if (!list.length) {
+                    html += '<p style="color:var(--text-muted);margin-bottom:16px">No APIs in this category yet (waiting for first successful scrape).</p>';
+                } else {
+                    html += '<div class="api-grid">';
+                    list.forEach(a => {
+                        html += '<div class="api-item"><a href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener noreferrer">' +
+                            escapeHtml(a.title || a.id) + '</a></div>';
+                    });
+                    html += '</div>';
+                }
+            });
+            if (!html || (q && totalShown === 0)) {
+                html = '<div class="empty-state"><h2>No matching APIs</h2><p>Try a different search or wait for the first monitoring cycle to finish.</p></div>';
+            }
+            document.getElementById('apis-content').innerHTML = html;
+        };
+
+        const fetchChanges = async () => {
+            try {
+                const res = await fetch(API_BASE + '/api/changes?limit=50');
+                if (!res.ok) throw new Error('fail');
+                const result = await res.json();
+                allChanges = Array.isArray(result.data) ? result.data : [];
+                filterChanges();
+            } catch (e) {
+                document.getElementById('changes-content').innerHTML =
+                    '<div class="error">Could not load change history. Server may still be starting the first scrape.</div>';
+            }
+        };
+
+        const fetchApis = async () => {
+            const cats = ['extensions', 'webstore', 'devtools'];
+            try {
+                const results = await Promise.all(cats.map(c =>
+                    fetch(API_BASE + '/api/snapshot/' + c).then(r => r.json()).catch(() => ({ data: [] }))
+                ));
+                cats.forEach((c, i) => {
+                    allApis[c] = Array.isArray(results[i].data) ? results[i].data : [];
+                });
+                renderApis();
+            } catch (e) {
+                document.getElementById('apis-content').innerHTML =
+                    '<div class="error">Failed to load tracked APIs.</div>';
+            }
+        };
+
+        const fetchStatus = async () => {
+            try {
+                const res = await fetch(API_BASE + '/api/status');
+                if (!res.ok) return;
+                const result = await res.json();
+                if (!result.success || !result.data) return;
+                const d = result.data;
+                document.getElementById('monitoring-status').textContent = d.monitoring ? 'Active' : 'Inactive';
+                document.getElementById('total-changes').textContent = d.totalChanges || 0;
+                document.getElementById('api-count').textContent = d.apiCount || 0;
+                document.getElementById('last-check').textContent = formatDate(d.lastCheck);
+            } catch (e) {}
+        };
+
+        const refresh = async () => {
+            const btn = document.getElementById('refresh-btn');
+            btn.disabled = true;
+            btn.textContent = 'Refreshing...';
+            await Promise.all([fetchStatus(), fetchApis(), fetchChanges()]);
+            btn.disabled = false;
+            btn.textContent = 'Refresh Now';
+        };
+
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            if (confirm('Clear only the change history view? (Tracked APIs and server data stay intact)')) {
+                allChanges = [];
+                showChangesEmpty();
+            }
+        });
+        document.getElementById('category-filter').addEventListener('change', filterChanges);
+        document.getElementById('type-filter').addEventListener('change', filterChanges);
+        document.getElementById('api-search').addEventListener('input', renderApis);
+        document.getElementById('refresh-btn').addEventListener('click', refresh);
+
+        refresh().then(() => {
+            refreshTimer = setInterval(() => {
+                fetchStatus();
+                fetchApis();
+                fetchChanges();
+            }, REFRESH_INTERVAL);
+        });
+    </script>
+</body>
+</html>
