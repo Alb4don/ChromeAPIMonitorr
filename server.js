@@ -13,6 +13,9 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const SNAPSHOT_FILE = path.join(DATA_DIR, 'snapshots.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const CACHE_DURATION = 5 * 60 * 1000;
+const POLL_INTERVAL = 15 * 60 * 1000;
+const MAX_HISTORY = 100;
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -55,10 +58,7 @@ const limiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, error: 'Rate limit exceeded. Try again later.' },
-  handler: (req, res) => {
-    res.status(429).json({ success: false, error: 'Rate limit exceeded. Try again later.' });
-  }
+  message: { success: false, error: 'Rate limit exceeded. Try again later.' }
 });
 
 app.use('/api/', limiter);
@@ -70,10 +70,6 @@ const CHROME_API_URLS = {
 };
 
 const VALID_CATEGORIES = new Set(Object.keys(CHROME_API_URLS));
-const CACHE_DURATION = 5 * 60 * 1000;
-const POLL_INTERVAL = 15 * 60 * 1000;
-const MAX_HISTORY = 100;
-
 const cache = new Map();
 let apiSnapshots = new Map();
 let changeHistory = [];
@@ -83,8 +79,7 @@ let isMonitoring = false;
 const loadPersisted = () => {
   try {
     if (fs.existsSync(SNAPSHOT_FILE)) {
-      const raw = fs.readFileSync(SNAPSHOT_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(fs.readFileSync(SNAPSHOT_FILE, 'utf8'));
       if (parsed && typeof parsed === 'object') {
         for (const [k, v] of Object.entries(parsed)) {
           if (Array.isArray(v)) apiSnapshots.set(k, v);
@@ -92,11 +87,8 @@ const loadPersisted = () => {
       }
     }
     if (fs.existsSync(HISTORY_FILE)) {
-      const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        changeHistory = parsed.slice(0, MAX_HISTORY);
-      }
+      const parsed = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+      if (Array.isArray(parsed)) changeHistory = parsed.slice(0, MAX_HISTORY);
     }
   } catch (e) {
     console.error('Persistence load failed');
@@ -106,11 +98,9 @@ const loadPersisted = () => {
 const savePersisted = () => {
   try {
     const snapObj = {};
-    for (const [k, v] of apiSnapshots.entries()) {
-      snapObj[k] = v;
-    }
-    fs.writeFileSync(SNAPSHOT_FILE, JSON.stringify(snapObj), 'utf8');
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(changeHistory.slice(0, MAX_HISTORY)), 'utf8');
+    for (const [k, v] of apiSnapshots.entries()) snapObj[k] = v;
+    fs.writeFileSync(SNAPSHOT_FILE, JSON.stringify(snapObj));
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(changeHistory.slice(0, MAX_HISTORY)));
   } catch (e) {
     console.error('Persistence save failed');
   }
@@ -124,119 +114,75 @@ const sanitizeHtml = (html) => {
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
     .replace(/javascript\s*:/gi, '')
-    .replace(/data\s*:/gi, '')
-    .replace(/<iframe\b[^>]*>.*?<\/iframe>/gi, '')
-    .replace(/<object\b[^>]*>.*?<\/object>/gi, '');
+    .replace(/data\s*:/gi, '');
 };
 
-const hashContent = (content) => {
-  return crypto.createHash('sha256').update(String(content || '')).digest('hex');
-};
-
-const isSuspicious = (req) => {
-  const ua = (req.headers['user-agent'] || '').toLowerCase();
-  const path = req.path || '';
-  const qs = req.url || '';
-  if (qs.includes('..') || qs.includes('%2e%2e') || qs.includes('etc/passwd') || qs.includes('proc/self') ||
-      qs.includes('<script') || qs.includes('javascript:') || qs.includes('${') || qs.includes('{{') ||
-      path.includes('..') || ua.includes('sqlmap') || ua.includes('nikto') || ua.includes('nmap')) {
-    return true;
-  }
-  return false;
-};
-
-const sarcasticReject = (res) => {
-  const lines = [
-    "Oh look, another brave explorer testing the boundaries. How original.",
-    "Congratulations, you found the 'try random stuff' button. It does nothing useful.",
-    "I'm sorry, Dave. I'm afraid I can't do that. Also, nice try.",
-    "Your creative input has been logged, analyzed, and politely ignored. Carry on.",
-    "If this was a movie, the security system would now make a witty remark. Consider this that remark."
-  ];
-  const msg = lines[Math.floor(Math.random() * lines.length)];
-  res.status(400).json({ success: false, error: msg });
-};
+const hashContent = (content) => crypto.createHash('sha256').update(String(content || '')).digest('hex');
+const normalizeText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 const extractApis = (html, category, baseUrl) => {
   const apis = [];
   const seen = new Set();
-  try {
-    const $ = cheerio.load(html);
+  const $ = cheerio.load(html);
+  const clean = sanitizeHtml(html);
 
-    if (category === 'extensions') {
-      $('a[href*="/docs/extensions/reference/api/"]').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        const match = href.match(/\/docs\/extensions\/reference\/api\/([a-zA-Z0-9_./-]+)/);
-        if (!match) return;
-        let id = match[1].replace(/\/$/, '');
-        if (id.includes('/') && !id.startsWith('devtools/')) {
-          id = id.split('/').pop();
-        }
-        if (!id || id.length < 2 || seen.has(id)) return;
-        seen.add(id);
-        const title = $(el).text().trim().substring(0, 200) || id;
-        const parentText = $(el).parent().text().trim().substring(0, 500);
-        apis.push({
-          id,
-          title,
-          contentHash: hashContent(parentText || title),
-          category,
-          url: href.startsWith('http') ? href : `https://developer.chrome.com${href}`
-        });
-      });
-    } else if (category === 'webstore') {
-      $('h2, h3, a[href*="/webstore/"]').each((_, el) => {
-        const $el = $(el);
-        const id = $el.attr('id') || $el.find('[id]').first().attr('id') || $el.text().trim().toLowerCase().replace(/\s+/g, '-').substring(0, 80);
-        const title = $el.text().trim().substring(0, 200);
-        if (!id || !title || title.length < 3 || seen.has(id)) return;
-        seen.add(id);
-        const content = sanitizeHtml($el.parent().html() || $el.html() || title);
-        apis.push({
-          id,
-          title,
-          contentHash: hashContent(content),
-          category,
-          url: `${baseUrl}#${id}`
-        });
-      });
-    } else if (category === 'devtools') {
-      $('a[href*="/tot/"], a[href*="/1-3/"], h2, h3').each((_, el) => {
-        const $el = $(el);
-        let id = $el.attr('id') || '';
-        const href = $el.attr('href') || '';
-        if (href) {
-          const m = href.match(/\/(tot|1-3|v8)\/([A-Za-z0-9_-]+)/);
-          if (m) id = m[2];
-        }
-        if (!id) id = $el.text().trim().toLowerCase().replace(/\s+/g, '-').substring(0, 80);
-        const title = $el.text().trim().substring(0, 200);
-        if (!id || !title || title.length < 3 || seen.has(id)) return;
-        seen.add(id);
-        apis.push({
-          id,
-          title,
-          contentHash: hashContent(title + id),
-          category,
-          url: href.startsWith('http') ? href : (href ? `https://chromedevtools.github.io/devtools-protocol${href}` : baseUrl)
-        });
-      });
-    }
-
-    if (apis.length === 0) {
-      const bodyText = $('body').text().replace(/\s+/g, ' ').substring(0, 50000);
-      const overallHash = hashContent(bodyText);
+  if (category === 'extensions') {
+    $('a[href*="/docs/extensions/reference/api/"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const m = href.match(/\/docs\/extensions\/reference\/api\/([a-zA-Z0-9_./-]+)/);
+      if (!m) return;
+      let id = m[1].replace(/\/$/, '');
+      if (id.includes('/')) id = id.split('/').pop();
+      if (!id || id.length < 2 || seen.has(id)) return;
+      seen.add(id);
+      const title = ($(el).text() || id).trim().substring(0, 200);
       apis.push({
-        id: 'page-content',
-        title: `${category} page content`,
-        contentHash: overallHash,
+        id,
+        title,
+        contentHash: hashContent(id + '|' + normalizeText(title)),
         category,
-        url: baseUrl
+        url: href.startsWith('http') ? href : 'https://developer.chrome.com' + href
       });
-    }
-  } catch (e) {
-    console.error(`Extract error ${category}`);
+    });
   }
+
+  if (apis.length < 5) {
+    $('h2[id], h3[id], h2, h3').each((_, el) => {
+      const $el = $(el);
+      let id = $el.attr('id') || normalizeText($el.text()).replace(/[^a-z0-9_-]+/g, '-').slice(0, 80);
+      const title = $el.text().trim().substring(0, 200);
+      if (!id || !title || title.length < 3 || seen.has(id)) return;
+      seen.add(id);
+      const excerpt = sanitizeHtml($el.parent().html() || $el.html() || title);
+      apis.push({
+        id,
+        title,
+        contentHash: hashContent(normalizeText(excerpt) || title),
+        category,
+        url: baseUrl + '#' + id
+      });
+    });
+  }
+
+  if (apis.length < 3) {
+    const textLinks = clean.match(/chrome\.[a-zA-Z0-9_]+/g) || [];
+    textLinks.forEach(name => {
+      const id = name.replace(/^chrome\./, '');
+      if (id.length < 2 || seen.has(id)) return;
+      seen.add(id);
+      apis.push({ id, title: name, contentHash: hashContent(name), category, url: baseUrl });
+    });
+  }
+
+  const pageHash = hashContent(normalizeText(clean).slice(0, 80000));
+  apis.push({
+    id: '__page__',
+    title: category + ' page content',
+    contentHash: pageHash,
+    category,
+    url: baseUrl
+  });
+
   return apis;
 };
 
@@ -245,17 +191,16 @@ const fetchApiContent = async (url, category) => {
     const response = await axios.get(url, {
       timeout: 15000,
       headers: {
-        'User-Agent': 'Chrome-API-Monitor/1.1 (compatible; research; +https://github.com/example)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache'
+        'User-Agent': 'Chrome-API-Monitor/1.2',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9'
       },
       maxRedirects: 5,
-      validateStatus: (s) => s >= 200 && s < 400
+      validateStatus: s => s >= 200 && s < 400
     });
     return extractApis(response.data, category, url);
   } catch (error) {
-    console.error(`Fetch error ${category}: ${error.message}`);
+    console.error('Fetch error ' + category + ': ' + (error.message || 'unknown'));
     return [];
   }
 };
@@ -266,34 +211,29 @@ const detectChanges = (oldApis, newApis, category) => {
     modified: [],
     removed: [],
     category,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    baseline: false
   };
-
-  const oldMap = new Map(oldApis.map(api => [api.id, api]));
-  const newMap = new Map(newApis.map(api => [api.id, api]));
+  const oldMap = new Map(oldApis.map(a => [a.id, a]));
+  const newMap = new Map(newApis.map(a => [a.id, a]));
 
   for (const newApi of newApis) {
     const oldApi = oldMap.get(newApi.id);
-    if (!oldApi) {
-      changes.added.push(newApi);
-    } else if (oldApi.contentHash !== newApi.contentHash) {
+    if (!oldApi) changes.added.push(newApi);
+    else if (oldApi.contentHash !== newApi.contentHash) {
       changes.modified.push({
         id: newApi.id,
         title: newApi.title,
-        category: newApi.category,
+        category,
         url: newApi.url,
         oldHash: oldApi.contentHash,
         newHash: newApi.contentHash
       });
     }
   }
-
   for (const oldApi of oldApis) {
-    if (!newMap.has(oldApi.id)) {
-      changes.removed.push(oldApi);
-    }
+    if (!newMap.has(oldApi.id)) changes.removed.push(oldApi);
   }
-
   return changes;
 };
 
@@ -301,27 +241,55 @@ const monitorApis = async () => {
   if (isMonitoring) return;
   isMonitoring = true;
   console.log('Starting API monitoring cycle...');
-
   try {
     for (const [category, url] of Object.entries(CHROME_API_URLS)) {
       const newApis = await fetchApiContent(url, category);
       const oldApis = apiSnapshots.get(category) || [];
 
-      if (oldApis.length > 0 && newApis.length > 0) {
-        const changes = detectChanges(oldApis, newApis, category);
-        const hasChanges = changes.added.length > 0 || changes.modified.length > 0 || changes.removed.length > 0;
-
-        if (hasChanges) {
-          changeHistory.unshift(changes);
-          changeHistory = changeHistory.slice(0, MAX_HISTORY);
-          console.log(`Changes detected in ${category}: added=${changes.added.length} modified=${changes.modified.length} removed=${changes.removed.length}`);
-        }
-      }
-
       if (newApis.length > 0) {
+        if (oldApis.length === 0) {
+          const baseline = {
+            added: newApis.filter(a => a.id !== '__page__'),
+            modified: [],
+            removed: [],
+            category,
+            timestamp: new Date().toISOString(),
+            baseline: true
+          };
+          if (baseline.added.length > 0) {
+            changeHistory.unshift(baseline);
+            changeHistory = changeHistory.slice(0, MAX_HISTORY);
+            console.log('Baseline established for ' + category + ' (' + baseline.added.length + ' entries)');
+          }
+        } else {
+          const changes = detectChanges(oldApis, newApis, category);
+          const meaningful = changes.added.filter(a => a.id !== '__page__').length +
+            changes.modified.filter(a => a.id !== '__page__').length +
+            changes.removed.filter(a => a.id !== '__page__').length;
+          const pageChanged = changes.modified.some(a => a.id === '__page__') ||
+            changes.added.some(a => a.id === '__page__') ||
+            changes.removed.some(a => a.id === '__page__');
+
+          if (meaningful > 0 || pageChanged) {
+            if (meaningful === 0 && pageChanged) {
+              changes.modified = changes.modified.filter(a => a.id === '__page__');
+              changes.added = [];
+              changes.removed = [];
+            } else {
+              changes.added = changes.added.filter(a => a.id !== '__page__');
+              changes.modified = changes.modified.filter(a => a.id !== '__page__');
+              changes.removed = changes.removed.filter(a => a.id !== '__page__');
+            }
+            if (changes.added.length || changes.modified.length || changes.removed.length) {
+              changeHistory.unshift(changes);
+              changeHistory = changeHistory.slice(0, MAX_HISTORY);
+              console.log('Changes in ' + category);
+            }
+          }
+        }
         apiSnapshots.set(category, newApis);
       }
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await new Promise(r => setTimeout(r, 3000));
     }
     lastMonitorTime = new Date().toISOString();
     savePersisted();
@@ -336,17 +304,27 @@ const monitorApis = async () => {
 
 const getCachedData = (key, fetchFn) => {
   const cached = cache.get(key);
-  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-    return cached.data;
-  }
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) return cached.data;
   const data = fetchFn();
   cache.set(key, { data, timestamp: Date.now() });
   return data;
 };
 
+const isSuspicious = (req) => {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  const path = req.path || '';
+  const qs = req.url || '';
+  if (qs.includes('..') || qs.includes('%2e') || qs.includes('etc/passwd') || qs.includes('proc/self') ||
+      qs.includes('<script') || qs.includes('javascript:') || qs.includes('${') || qs.includes('{{') ||
+      path.includes('..') || ua.includes('sqlmap') || ua.includes('nikto') || ua.includes('nmap')) {
+    return true;
+  }
+  return false;
+};
+
 app.use((req, res, next) => {
   if (isSuspicious(req)) {
-    return sarcasticReject(res);
+    return res.status(400).json({ success: false, error: 'Request rejected' });
   }
   next();
 });
@@ -357,11 +335,7 @@ app.get('/api/changes', (req, res) => {
     if (isNaN(limit) || limit < 1) limit = 20;
     limit = Math.min(limit, 100);
     const data = getCachedData('changes', () => changeHistory.slice(0, limit));
-    res.json({
-      success: true,
-      data,
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, data, timestamp: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
@@ -372,16 +346,11 @@ app.get('/api/status', (req, res) => {
     const data = getCachedData('status', () => ({
       monitoring: true,
       categories: Object.keys(CHROME_API_URLS),
-      lastCheck: lastMonitorTime || changeHistory[0]?.timestamp || null,
+      lastCheck: lastMonitorTime || (changeHistory[0] && changeHistory[0].timestamp) || null,
       totalChanges: changeHistory.length,
-      apiCount: Array.from(apiSnapshots.values()).reduce((sum, apis) => sum + apis.length, 0),
-      uptime: Math.floor(process.uptime())
+      apiCount: Array.from(apiSnapshots.values()).reduce((s, a) => s + a.filter(x => x.id !== '__page__').length, 0)
     }));
-    res.json({
-      success: true,
-      data,
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, data, timestamp: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
@@ -393,13 +362,11 @@ app.get('/api/snapshot/:category', (req, res) => {
     if (!VALID_CATEGORIES.has(category)) {
       return res.status(404).json({ success: false, error: 'Category not found' });
     }
-    const data = getCachedData(`snapshot-${category}`, () => apiSnapshots.get(category) || []);
-    res.json({
-      success: true,
-      data,
-      category,
-      timestamp: new Date().toISOString()
+    const data = getCachedData('snapshot-' + category, () => {
+      const list = apiSnapshots.get(category) || [];
+      return list.filter(a => a.id !== '__page__');
     });
+    res.json({ success: true, data, category, timestamp: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
@@ -413,7 +380,7 @@ app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ success: false, error: 'Not found' });
   }
-  res.status(404).sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+  res.status(404).sendFile(path.join(__dirname, 'public', 'index.html'), err => {
     if (err) res.status(404).json({ success: false, error: 'Not found' });
   });
 });
@@ -429,6 +396,6 @@ app.use((err, req, res, next) => {
 })();
 
 app.listen(PORT, () => {
-  console.log(`Chrome API Monitor running on port ${PORT}`);
-  console.log(`Monitoring interval: ${POLL_INTERVAL / 1000}s`);
+  console.log('Chrome API Monitor running on port ' + PORT);
+  console.log('Monitoring interval: ' + (POLL_INTERVAL / 1000) + 's');
 });
