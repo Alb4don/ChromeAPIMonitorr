@@ -9,6 +9,8 @@
 
   <img width="1222" height="637" alt="frontmonitor" src="https://github.com/user-attachments/assets/6c8aabbb-61f2-4f73-a3bc-f8c13ef77424" />
 
+  <img width="1274" height="634" alt="Reportfrontend" src="https://github.com/user-attachments/assets/f417f73f-898d-4382-b660-69cbbcda0337" />
+
 ### `Monitored sources`
 
    Category    | URL |
