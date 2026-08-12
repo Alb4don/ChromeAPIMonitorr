@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="description" content="Real-time Chrome API change monitoring dashboard">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; img-src 'self' data:; font-src 'self' https://cdn.jsdelivr.net">
     <title>Chrome API Monitor</title>
     <style>
         :root {
@@ -110,6 +110,8 @@
         button:hover:not(:disabled) { background: var(--primary-hover); }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
         .btn-secondary { background: var(--surface2); }
+        .btn-report { background: #0d9488; }
+        .btn-report:hover:not(:disabled) { background: #0f766e; }
         .filter-group { display: flex; gap: 8px; align-items: center; }
         label { font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
         select {
@@ -132,6 +134,7 @@
             border-radius: 10px;
             border: 1px solid var(--border);
             width: fit-content;
+            flex-wrap: wrap;
         }
         .tab {
             padding: 10px 22px;
@@ -143,10 +146,7 @@
             background: transparent;
             border: none;
         }
-        .tab.active {
-            background: var(--primary);
-            color: white;
-        }
+        .tab.active { background: var(--primary); color: white; }
         .panel { display: none; }
         .panel.active { display: block; }
         .panel-box {
@@ -155,7 +155,7 @@
             padding: 24px;
             border: 1px solid var(--border);
             box-shadow: var(--shadow);
-            min-height: 360px;
+            min-height: 320px;
         }
         .change-card {
             border: 1px solid var(--border);
@@ -276,6 +276,50 @@
             border-radius: 8px;
             border-left: 3px solid var(--primary);
         }
+        .insight-box {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px 20px;
+            margin-bottom: 20px;
+        }
+        .insight-box h3 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            color: #a5b4fc;
+        }
+        .insight-box p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-bottom: 8px;
+        }
+        .chart-wrap {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 20px;
+            overflow-x: auto;
+        }
+        .chart-wrap h3 {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+        .chart-legend {
+            display: flex;
+            gap: 16px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+        .chart-legend span { display: flex; align-items: center; gap: 6px; }
+        .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+        .dot-added { background: var(--success); }
+        .dot-modified { background: var(--warning); }
+        .dot-removed { background: var(--danger); }
         @media (max-width: 768px) {
             h1 { font-size: 1.4rem; }
             .controls { flex-direction: column; align-items: stretch; }
@@ -317,6 +361,7 @@
         <div class="controls">
             <button id="refresh-btn">Refresh Now</button>
             <button id="clear-btn" class="btn-secondary">Clear Changes View</button>
+            <button id="report-btn" class="btn-report">Download HTML Report</button>
             <div class="filter-group" id="changes-filters">
                 <label for="category-filter">Category</label>
                 <select id="category-filter">
@@ -340,6 +385,7 @@
         <div class="tabs">
             <button class="tab active" data-tab="apis">Tracked APIs</button>
             <button class="tab" data-tab="changes">Change History</button>
+            <button class="tab" data-tab="analysis">Analysis</button>
         </div>
 
         <div id="panel-apis" class="panel active">
@@ -353,8 +399,28 @@
 
         <div id="panel-changes" class="panel">
             <div class="panel-box">
-                <div class="hint">Changes appear only after the second monitoring cycle detects differences in the official docs (every ~15 min). The first run establishes the baseline.</div>
+                <div class="hint">First run records a baseline. Later cycles report only real additions, modifications and removals when the official documentation changes.</div>
                 <div id="changes-content"></div>
+            </div>
+        </div>
+
+        <div id="panel-analysis" class="panel">
+            <div class="panel-box">
+                <div class="insight-box">
+                    <h3>Change explanation</h3>
+                    <div id="insight-text">
+                        <p>Waiting for data…</p>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <h3>Change volume (recent events)</h3>
+                    <div id="chart-container"></div>
+                    <div class="chart-legend">
+                        <span><i class="dot dot-added"></i> Added</span>
+                        <span><i class="dot dot-modified"></i> Modified</span>
+                        <span><i class="dot dot-removed"></i> Removed</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -365,6 +431,7 @@
         let refreshTimer = null;
         let allChanges = [];
         let allApis = { extensions: [], webstore: [], devtools: [] };
+        let statusData = {};
 
         const escapeHtml = (text) => {
             if (text == null) return '';
@@ -395,31 +462,38 @@
                 document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
                 tab.classList.add('active');
                 document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+                if (tab.dataset.tab === 'analysis') renderAnalysis();
             });
         });
 
         const showChangesEmpty = () => {
             document.getElementById('changes-content').innerHTML =
-                '<div class="empty-state"><h2>No changes detected yet</h2><p>Baseline is established on first run. Real additions, modifications and removals will appear here after the next monitoring cycles when official docs change.</p></div>';
+                '<div class="empty-state"><h2>No changes recorded yet</h2><p>On first run the monitor records a baseline of all discovered APIs. Subsequent cycles report only real additions, modifications and removals when the official documentation changes.</p></div>';
         };
 
         const renderChange = (change) => {
             const sections = [];
+            const isBaseline = !!change.baseline;
             ['added', 'modified', 'removed'].forEach(type => {
                 if (change[type] && change[type].length > 0) {
-                    const items = change[type].map(item =>
+                    const filtered = change[type].filter(item => item.id !== '__page__');
+                    if (!filtered.length) return;
+                    const items = filtered.map(item =>
                         '<div class="change-item"><a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener noreferrer">' +
                         escapeHtml(item.title || item.id) + '</a></div>'
                     ).join('');
+                    const label = (isBaseline && type === 'added')
+                        ? ('Baseline (' + filtered.length + ')')
+                        : (type.charAt(0).toUpperCase() + type.slice(1) + ' (' + filtered.length + ')');
                     sections.push(
-                        '<div class="change-section"><div class="change-type type-' + type + '">' +
-                        type.charAt(0).toUpperCase() + type.slice(1) + ' (' + change[type].length + ')</div>' + items + '</div>'
+                        '<div class="change-section"><div class="change-type type-' + type + '">' + label + '</div>' + items + '</div>'
                     );
                 }
             });
             if (!sections.length) return '';
             return '<div class="change-card"><div class="change-header">' +
-                '<span class="category-badge category-' + escapeHtml(change.category) + '">' + escapeHtml(change.category) + '</span>' +
+                '<span class="category-badge category-' + escapeHtml(change.category) + '">' + escapeHtml(change.category) +
+                (isBaseline ? ' · baseline' : '') + '</span>' +
                 '<span class="timestamp">' + formatDate(change.timestamp) + '</span></div>' + sections.join('') + '</div>';
         };
 
@@ -447,7 +521,7 @@
                 html += '<div class="api-category-title"><span class="category-badge category-' + cat + '">' + cat + '</span>' +
                     '<span class="count-pill">' + list.length + '</span></div>';
                 if (!list.length) {
-                    html += '<p style="color:var(--text-muted);margin-bottom:16px">No APIs in this category yet (waiting for first successful scrape).</p>';
+                    html += '<p style="color:var(--text-muted);margin-bottom:16px">No APIs in this category yet.</p>';
                 } else {
                     html += '<div class="api-grid">';
                     list.forEach(a => {
@@ -458,9 +532,168 @@
                 }
             });
             if (!html || (q && totalShown === 0)) {
-                html = '<div class="empty-state"><h2>No matching APIs</h2><p>Try a different search or wait for the first monitoring cycle to finish.</p></div>';
+                html = '<div class="empty-state"><h2>No matching APIs</h2><p>Try a different search or wait for the first monitoring cycle.</p></div>';
             }
             document.getElementById('apis-content').innerHTML = html;
+        };
+
+        const explainChanges = () => {
+            if (!allChanges.length) {
+                return 'No change events recorded yet. After the first monitoring cycle a baseline is stored; later cycles will describe real differences found in the official documentation.';
+            }
+            const recent = allChanges.slice(0, 8);
+            let totalAdded = 0, totalMod = 0, totalRem = 0;
+            const byCat = {};
+            const baselines = [];
+            recent.forEach(c => {
+                const a = (c.added || []).filter(x => x.id !== '__page__').length;
+                const m = (c.modified || []).filter(x => x.id !== '__page__').length;
+                const r = (c.removed || []).filter(x => x.id !== '__page__').length;
+                totalAdded += a; totalMod += m; totalRem += r;
+                if (!byCat[c.category]) byCat[c.category] = { a: 0, m: 0, r: 0 };
+                byCat[c.category].a += a;
+                byCat[c.category].m += m;
+                byCat[c.category].r += r;
+                if (c.baseline) baselines.push(c.category);
+            });
+            const parts = [];
+            if (baselines.length) {
+                parts.push('Baseline snapshots were recorded for: ' + baselines.join(', ') + '.');
+            }
+            if (totalAdded + totalMod + totalRem === 0 && !baselines.length) {
+                parts.push('Recent events contain only page-level content shifts or empty diffs.');
+            } else if (totalAdded + totalMod + totalRem > 0) {
+                parts.push('Across the last ' + recent.length + ' events: ' + totalAdded + ' addition(s), ' + totalMod + ' modification(s), ' + totalRem + ' removal(s).');
+                Object.keys(byCat).forEach(cat => {
+                    const v = byCat[cat];
+                    if (v.a + v.m + v.r > 0) {
+                        parts.push(cat + ' — +' + v.a + ' ~' + v.m + ' -' + v.r + '.');
+                    }
+                });
+            }
+            const last = recent[0];
+            if (last && last.timestamp) {
+                parts.push('Most recent event: ' + formatDate(last.timestamp) + ' (' + last.category + ').');
+            }
+            parts.push('Detection is hash-based. An entry is marked modified when its content hash differs from the previous snapshot; page-level hashes catch large documentation restructuring.');
+            return parts.join(' ');
+        };
+
+        const renderChart = () => {
+            const container = document.getElementById('chart-container');
+            if (!allChanges.length) {
+                container.innerHTML = '<p style="color:var(--text-muted);font-size:0.9rem">No events to plot yet.</p>';
+                return;
+            }
+            const events = allChanges.slice(0, 12).reverse();
+            const width = Math.max(480, events.length * 48);
+            const height = 160;
+            const pad = { t: 16, r: 12, b: 36, l: 36 };
+            const chartW = width - pad.l - pad.r;
+            const chartH = height - pad.t - pad.b;
+            const maxVal = Math.max(1, ...events.map(e => {
+                const a = (e.added || []).filter(x => x.id !== '__page__').length;
+                const m = (e.modified || []).filter(x => x.id !== '__page__').length;
+                const r = (e.removed || []).filter(x => x.id !== '__page__').length;
+                return a + m + r;
+            }));
+            const barW = Math.min(28, chartW / events.length - 6);
+            let bars = '';
+            events.forEach((e, i) => {
+                const a = (e.added || []).filter(x => x.id !== '__page__').length;
+                const m = (e.modified || []).filter(x => x.id !== '__page__').length;
+                const r = (e.removed || []).filter(x => x.id !== '__page__').length;
+                const total = a + m + r;
+                const x = pad.l + i * (chartW / events.length) + 4;
+                let y = pad.t + chartH;
+                const scale = chartH / maxVal;
+                if (r > 0) {
+                    const h = r * scale;
+                    y -= h;
+                    bars += '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + h + '" fill="#ef4444" rx="2"/>';
+                }
+                if (m > 0) {
+                    const h = m * scale;
+                    y -= h;
+                    bars += '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + h + '" fill="#f59e0b" rx="2"/>';
+                }
+                if (a > 0) {
+                    const h = a * scale;
+                    y -= h;
+                    bars += '<rect x="' + x + '" y="' + y + '" width="' + barW + '" height="' + h + '" fill="#22c55e" rx="2"/>';
+                }
+                const label = (e.category || '').slice(0, 3);
+                bars += '<text x="' + (x + barW / 2) + '" y="' + (height - 8) + '" text-anchor="middle" fill="#94a3b8" font-size="10">' + escapeHtml(label) + '</text>';
+            });
+            const svg = '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="Change volume chart">' +
+                '<line x1="' + pad.l + '" y1="' + (pad.t + chartH) + '" x2="' + (width - pad.r) + '" y2="' + (pad.t + chartH) + '" stroke="#475569"/>' +
+                bars + '</svg>';
+            container.innerHTML = svg;
+        };
+
+        const renderAnalysis = () => {
+            document.getElementById('insight-text').innerHTML = '<p>' + escapeHtml(explainChanges()) + '</p>';
+            renderChart();
+        };
+
+        const buildReportHtml = () => {
+            const now = new Date().toISOString();
+            const cats = ['extensions', 'webstore', 'devtools'];
+            let apiSections = '';
+            cats.forEach(cat => {
+                const list = allApis[cat] || [];
+                apiSections += '<h3 class="mt-4">' + cat + ' <span class="badge bg-secondary">' + list.length + '</span></h3><ul class="list-group mb-3">';
+                list.slice(0, 200).forEach(a => {
+                    apiSections += '<li class="list-group-item"><a href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">' + escapeHtml(a.title || a.id) + '</a></li>';
+                });
+                apiSections += '</ul>';
+            });
+            let changeSections = '';
+            allChanges.slice(0, 30).forEach(c => {
+                const isB = c.baseline ? ' (baseline)' : '';
+                changeSections += '<div class="card mb-3"><div class="card-header d-flex justify-content-between"><span class="badge bg-primary">' + escapeHtml(c.category) + isB + '</span><small class="text-muted">' + escapeHtml(c.timestamp || '') + '</small></div><div class="card-body">';
+                ['added', 'modified', 'removed'].forEach(type => {
+                    const items = (c[type] || []).filter(x => x.id !== '__page__');
+                    if (!items.length) return;
+                    changeSections += '<h6 class="text-' + (type === 'added' ? 'success' : type === 'modified' ? 'warning' : 'danger') + '">' + type + ' (' + items.length + ')</h6><ul>';
+                    items.forEach(i => {
+                        changeSections += '<li><a href="' + escapeHtml(i.url) + '" target="_blank" rel="noopener">' + escapeHtml(i.title || i.id) + '</a></li>';
+                    });
+                    changeSections += '</ul>';
+                });
+                changeSections += '</div></div>';
+            });
+            const explanation = escapeHtml(explainChanges());
+            return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+                '<title>Chrome API Monitor Report</title>' +
+                '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">' +
+                '</head><body class="bg-light"><div class="container py-4">' +
+                '<h1 class="mb-1">Chrome API Monitor Report</h1>' +
+                '<p class="text-muted">Generated ' + escapeHtml(now) + '</p>' +
+                '<div class="row g-3 mb-4">' +
+                '<div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Status</div><div class="fs-4">' + (statusData.monitoring ? 'Active' : 'Inactive') + '</div></div></div></div>' +
+                '<div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">APIs Tracked</div><div class="fs-4">' + (statusData.apiCount || 0) + '</div></div></div></div>' +
+                '<div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Change Events</div><div class="fs-4">' + (statusData.totalChanges || 0) + '</div></div></div></div>' +
+                '<div class="col-md-3"><div class="card"><div class="card-body"><div class="text-muted small">Last Check</div><div class="fs-5">' + escapeHtml(formatDate(statusData.lastCheck)) + '</div></div></div></div>' +
+                '</div>' +
+                '<div class="card mb-4"><div class="card-header">Analysis</div><div class="card-body"><p>' + explanation + '</p></div></div>' +
+                '<h2 class="h4 mt-4">Change History</h2>' + (changeSections || '<p class="text-muted">No change events.</p>') +
+                '<h2 class="h4 mt-5">Tracked APIs</h2>' + apiSections +
+                '<hr class="my-4"><p class="text-muted small">Report generated by Chrome API Monitor. Data reflects the server state at generation time.</p>' +
+                '</div></body></html>';
+        };
+
+        const downloadReport = () => {
+            const html = buildReportHtml();
+            const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'chrome-api-monitor-report-' + new Date().toISOString().slice(0, 10) + '.html';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
         };
 
         const fetchChanges = async () => {
@@ -470,9 +703,10 @@
                 const result = await res.json();
                 allChanges = Array.isArray(result.data) ? result.data : [];
                 filterChanges();
+                if (document.getElementById('panel-analysis').classList.contains('active')) renderAnalysis();
             } catch (e) {
                 document.getElementById('changes-content').innerHTML =
-                    '<div class="error">Could not load change history. Server may still be starting the first scrape.</div>';
+                    '<div class="error">Could not load change history.</div>';
             }
         };
 
@@ -498,11 +732,11 @@
                 if (!res.ok) return;
                 const result = await res.json();
                 if (!result.success || !result.data) return;
-                const d = result.data;
-                document.getElementById('monitoring-status').textContent = d.monitoring ? 'Active' : 'Inactive';
-                document.getElementById('total-changes').textContent = d.totalChanges || 0;
-                document.getElementById('api-count').textContent = d.apiCount || 0;
-                document.getElementById('last-check').textContent = formatDate(d.lastCheck);
+                statusData = result.data;
+                document.getElementById('monitoring-status').textContent = statusData.monitoring ? 'Active' : 'Inactive';
+                document.getElementById('total-changes').textContent = statusData.totalChanges || 0;
+                document.getElementById('api-count').textContent = statusData.apiCount || 0;
+                document.getElementById('last-check').textContent = formatDate(statusData.lastCheck);
             } catch (e) {}
         };
 
@@ -516,11 +750,13 @@
         };
 
         document.getElementById('clear-btn').addEventListener('click', () => {
-            if (confirm('Clear only the change history view? (Tracked APIs and server data stay intact)')) {
+            if (confirm('Clear only the change history view?')) {
                 allChanges = [];
                 showChangesEmpty();
+                renderAnalysis();
             }
         });
+        document.getElementById('report-btn').addEventListener('click', downloadReport);
         document.getElementById('category-filter').addEventListener('change', filterChanges);
         document.getElementById('type-filter').addEventListener('change', filterChanges);
         document.getElementById('api-search').addEventListener('input', renderApis);
